@@ -3,9 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "dev": "python3 app.py",
+    "dev": "python3 app.py && python3 -m http.server 3000 --bind 0.0.0.0",
     "build": "python3 -m py_compile app.py tools/export_toucan_ncnn.py",
     "lint": "python3 -m py_compile app.py tools/export_toucan_ncnn.py",
-    "start": "python3 app.py"
+    "start": "python3 app.py && python3 -m http.server 3000 --bind 0.0.0.0"
   }
 }
