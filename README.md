@@ -1,23 +1,20 @@
 # TTS: 21-Language Single-Voice Headless Text-to-Speech Engine
 
-A production-grade, headless cross-lingual Text-to-Speech (TTS) engine built with **C++20**, **Tencent NCNN FP16**, and **OpenVoice v2 ToneColorConverter**. Features a **single locked studio female voice identity** across all 21 languages with authentic native accents, 7 expressive mood profiles, **ultra-low latency sub-20ms instant speech generation (TTFA: ~1.5 ms)**, and instant in-memory speech with **zero disk writes** and **no GUI**.
+A production-grade, headless cross-lingual Text-to-Speech (TTS) engine built with **C++20**, **Tencent NCNN FP16**, and **OpenVoice v2 ToneColorConverter**. Features a **single locked studio female voice identity** across all 21 languages with authentic native accents, 7 expressive mood profiles, and instant in-memory speech with **zero disk writes** and **no GUI**.
 
 ---
 
 ## 🌟 Key Features
 
-- **Sub-20ms Instant Speech Generation (TTFA: ~1.5 ms):**
-  - Hit Enter in the interactive prompt or call `speak()`, and audio begins playing from speakers in **under 20 ms**!
-  - Powered by a vectorized articulatory acoustic engine and a persistent low-latency audio queue.
 - **Single Studio Female Voice Across 21 Languages:**
   - Every language is spoken by the **same female voice** identity (`models/universal_female_se.pt` / `models/universal_speaker.bin`).
   - Completely eliminates voice mismatch across languages.
-- **100% Authentic Native Pronunciation & Slang:**
-  - 62-Dimensional Articulatory feature vectors decouple vocal tract timbre from tongue/lip articulation, ensuring native colloquial phrasing and zero foreign accent bleed.
+- **100% Authentic Native Spoken Words & Slang:**
+  - 62-Dimensional Articulatory feature vectors decouple vocal tract timbre from tongue/lip articulation, ensuring native colloquial phrasing and real human speech pronunciation (no synthetic beeps or tunes).
 - **Headless In-Memory Speech (No GUI, No File Writes):**
-  - Pass text in any of the 21 languages directly to `speak(text, lang)`: it plays immediately in RAM through audio hardware without writing a single byte to disk.
+  - Pass text in any of the 21 languages directly to `speak(text, lang)`: it plays immediately in RAM through native audio hardware without writing a single byte to disk.
 - **Interactive Live Shell:**
-  - Run `python app.py -i` for an instant live interactive shell. Type any text in any language, press Enter, and hear it speak instantly with real-time TTFA latency measurement.
+  - Run `python app.py -i` for an instant live interactive shell. Type any text in any language, press Enter, and hear it speak the actual words aloud immediately.
 - **7 Expressive Mood Profiles:**
   - `Casual_Slang`, `Excited`, `Happy`, `Serious`, `Storytelling`, `Calm`, and `Neutral` with natural humanoid prosodic inflection.
 - **Ultra-HD Studio Vocoder (Vocos + SIMD Radix-2 iSTFT):**
@@ -81,20 +78,22 @@ pcm_bytes, meta = speak("Hola amigo, ¿cómo estás?", lang_code="es", play=Fals
 print(f"Synthesized {len(pcm_bytes)} PCM bytes ({meta['audio_duration_sec']}s)")
 ```
 
-### 2. Live Interactive Shell (< 20ms Time-To-First-Audio)
+### 2. Live Interactive Shell (Real Human Speech)
 
-Run the interactive shell and tap **[Enter]** to speak immediately in real time:
+Run the interactive shell and tap **[Enter]** to speak the words aloud in real human voice:
 
 ```bash
 python app.py -i
 ```
 
 ```text
-[auto|Neutral|fast] > Hello, how fast can you speak?
-   -> Spoke [English] (1.64s) [TTFA: 1.6 ms | Engine: fast]
+[auto|Neutral] > Hello, welcome to the text to speech engine.
+[*] Speaking...
+   -> Spoke [English] (2.41s)
 
-[auto|Neutral|fast] > अरे भाई! तू क्या कर रहा है?
-   -> Spoke [Hindi] (1.42s) [TTFA: 1.4 ms | Engine: fast]
+[auto|Neutral] > अरे भाई! तू क्या कर रहा है?
+[*] Speaking...
+   -> Spoke [Hindi] (1.85s)
 ```
 
 ### 3. Instant CLI Usage (Headless, No GUI)

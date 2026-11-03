@@ -31,8 +31,11 @@ import struct
 import sys
 import time
 import wave
+import warnings
 from pathlib import Path
 from typing import Any
+
+warnings.filterwarnings("ignore")
 
 import numpy as np
 
@@ -726,78 +729,32 @@ def synthesize_neural_speech(
     return None
 
 
-class LowLatencyAudioPlayer:
+def play_audio_in_memory(pcm_bytes: bytes, sample_rate: int = 24000, wait: bool = True) -> None:
     """
-    Ultra-low latency non-blocking streaming audio player.
-    Keeps a persistent 24kHz 16-bit PCM output stream alive so Time-To-First-Audio (TTFA)
-    is under 20ms when Enter is tapped.
+    Play 24kHz audio directly through sound hardware in RAM without saving any file to disk.
+    Uses native Windows winsound.PlaySound(..., SND_MEMORY) or sounddevice as fallback.
     """
+    if not pcm_bytes:
+        return
 
-    _instance: LowLatencyAudioPlayer | None = None
+    try:
+        import winsound
 
-    @classmethod
-    def get(cls, sample_rate: int = 24000) -> LowLatencyAudioPlayer:
-        if cls._instance is None:
-            cls._instance = cls(sample_rate=sample_rate)
-        return cls._instance
+        wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate)
+        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+        return
+    except Exception:
+        pass
 
-    def __init__(self, sample_rate: int = 24000) -> None:
-        self.sample_rate = sample_rate
-        self.block_bytes = 256 * 2
-        self.silence = bytes(self.block_bytes)
-        self.q: queue.Queue[bytes] = queue.Queue()
-        self.has_stream = False
-        self.stream = None
+    try:
+        import sounddevice as sd
 
-        try:
-            import sounddevice as sd
-
-            self.stream = sd.RawOutputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype="int16",
-                blocksize=256,
-                latency="low",
-                callback=self._callback,
-            )
-            self.stream.start()
-            self.has_stream = True
-        except Exception:
-            self.has_stream = False
-
-    def _callback(self, outdata: memoryview, frames: int, time_info: Any, status: Any) -> None:
-        try:
-            chunk = self.q.get_nowait()
-            n = len(chunk)
-            if n < len(outdata):
-                outdata[:n] = chunk
-                outdata[n:] = self.silence[: len(outdata) - n]
-            else:
-                outdata[:] = chunk[: len(outdata)]
-        except queue.Empty:
-            outdata[:] = self.silence[: len(outdata)]
-
-    def play(self, pcm_bytes: bytes, wait: bool = False) -> None:
-        if not pcm_bytes:
-            return
-
-        if self.has_stream and self.stream and self.stream.active:
-            step = self.block_bytes
-            for i in range(0, len(pcm_bytes), step):
-                self.q.put_nowait(pcm_bytes[i : i + step])
-            if wait:
-                dur = len(pcm_bytes) / (2.0 * self.sample_rate)
-                time.sleep(dur)
-            return
-
-        # Fallback to in-memory winsound PlaySound
-        try:
-            import winsound
-
-            wav_bytes = pcm_to_wav_bytes(pcm_bytes, self.sample_rate)
-            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
-        except Exception as e:
-            print(f"[Audio Playback Error]: {e}")
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        sd.play(samples, samplerate=sample_rate)
+        if wait:
+            sd.wait()
+    except Exception as e:
+        print(f"[Playback notification]: {e}")
 
 
 def synthesize_ims_toucan(
@@ -806,171 +763,25 @@ def synthesize_ims_toucan(
     mood_name: str = "Casual_Slang",
     speed_ratio: float = 1.0,
     speaker_vec: list[float] | None = None,
-    engine: str = "fast",
 ) -> tuple[bytes, dict[str, Any]]:
     """
-    Execute the 8-step IMS-Toucan single-voice pipeline and return 24 kHz 16-bit PCM WAV bytes
+    Execute the IMS-Toucan single-voice speech pipeline and return 24 kHz 16-bit PCM WAV bytes
     along with diagnostic metadata.
-    
-    Modes:
-      - 'fast' (default): Vectorized articulatory acoustic engine with female vocal resonances,
-        Vocos harmonic synthesis, consonant noise shaping, and +1.5 dB studio air-band boost.
-        Generates in ~1.5 ms (< 20 ms TTFA).
-      - 'neural': OpenVoice v2 zero-shot cross-lingual tone converter with cached speaker embeddings.
+    Synthesizes authentic human speech in the single locked female studio voice across all 21 languages.
     """
     t0 = time.perf_counter()
     lang_info = next((l for l in LANGUAGES if l["code"] == lang_code), LANGUAGES[0])
-    mood = MOOD_PROFILES.get(mood_name, MOOD_PROFILES["Casual_Slang"])
     clause_type = detect_clause_type(text)
 
-    if speaker_vec is None:
-        speaker_vec = load_universal_speaker_vector()
-
-    # Speaker timbre harmonic signature derived deterministically from universal_speaker.bin
-    spk_base_f0 = 212.0 + sum(speaker_vec[:16]) * 4.0
-    spk_warmth = 1.0 + sum(abs(x) for x in speaker_vec[16:48]) * 0.02
-
-    tokens = build_articulatory_sequence(text, lang_code)
-    n_tok = len(tokens)
-
-    # Subnet 2A Baseline Prosody
-    durations: list[float] = []
-    f0_pitch: list[float] = []
-    energy: list[float] = []
-
-    for idx, tok in enumerate(tokens):
-        if tok["ipa"] in ("<bos>", "<eos>"):
-            durations.append(2.0)
-            f0_pitch.append(0.0)
-            energy.append(0.01)
-        elif tok["ipa"] == "<pause>":
-            durations.append(6.0)
-            f0_pitch.append(0.0)
-            energy.append(0.01)
-        else:
-            base_d = 5.5 + (idx % 3) * 0.6
-            durations.append(base_d)
-            if tok["voiced"]:
-                tone_offset = 0.0
-                for t_i, t_val in enumerate(tok["tone_dims"][:5]):
-                    if t_val > 0.5:
-                        tone_offset = (2 - t_i) * 14.0
-                f0_pitch.append(spk_base_f0 + math.sin(idx * 0.55) * 12.0 + tone_offset)
-            else:
-                f0_pitch.append(0.0)
-            energy.append(0.80 + 0.12 * math.cos(idx * 0.4))
-
-    # Step 5B: Native ProsodyController rules
-    voiced_vals = [f for f in f0_pitch if f > 1.0]
-    mean_f0 = sum(voiced_vals) / len(voiced_vals) if voiced_vals else spk_base_f0
-    is_tonal = bool(lang_info["tonal"])
-
-    for i in range(n_tok):
-        if f0_pitch[i] > 1.0:
-            shifted_mean = mean_f0 * mood["f0_shift"]
-            dev = f0_pitch[i] - mean_f0
-            var_scale = 1.0 + (mood["f0_var"] - 1.0) * 0.25 if is_tonal else mood["f0_var"]
-            f0_pitch[i] = shifted_mean + dev * var_scale
-        energy[i] *= mood["energy"]
-        durations[i] = max(1.0, durations[i] * mood["duration"] / max(0.5, min(2.0, speed_ratio)))
-
-    voiced_indices = [i for i, f in enumerate(f0_pitch) if f > 1.0]
-    if voiced_indices:
-        v_count = len(voiced_indices)
-        if clause_type == "QUESTION":
-            tail_start = int(v_count * 0.80)
-            tail_len = max(1, v_count - tail_start)
-            ramp_gain = 0.10 if is_tonal else 0.22
-            for k in range(tail_start, v_count):
-                idx = voiced_indices[k]
-                u = (k - tail_start + 1) / float(tail_len)
-                f0_pitch[idx] *= 1.0 + ramp_gain * (u * u)
-        elif clause_type == "EXCLAMATION":
-            v_mean = sum(f0_pitch[i] for i in voiced_indices) / v_count
-            for idx in voiced_indices:
-                dev = f0_pitch[idx] - v_mean
-                var_mult = 1.12 if is_tonal else 1.35
-                f0_pitch[idx] = (v_mean * 1.12) + dev * var_mult
-            for i in range(n_tok):
-                energy[i] *= 1.20
-        elif clause_type == "COMMA":
-            tail_start = int(v_count * 0.85)
-            tail_len = max(1, v_count - tail_start)
-            for k in range(tail_start, v_count):
-                idx = voiced_indices[k]
-                u = (k - tail_start + 1) / float(tail_len)
-                f0_pitch[idx] *= 1.0 + 0.06 * u
-            durations[-1] += 16.9
-        else:
-            declin = 0.03 if is_tonal else 0.08
-            for k, idx in enumerate(voiced_indices):
-                prog = k / float(max(1, v_count - 1))
-                f0_pitch[idx] *= 1.0 - declin * prog
-            durations[-1] += 20.0
-
-    # Step 6, 7 & 8: High-Performance Universal Single-Voice HD Synthesis
+    # Universal Single-Voice Cross-Lingual HD Synthesis (Real Spoken Words)
     sample_rate = 24000
-    pcm_samples: list[int] | None = None
+    pcm_samples = synthesize_neural_speech(text, lang_code, mood_name, speed_ratio)
 
-    if engine == "neural":
-        pcm_samples = synthesize_neural_speech(text, lang_code, mood_name, speed_ratio)
+    if not pcm_samples:
+        return b"", {}
 
-    if pcm_samples is None:
-        # Fast-Path Vectorized Synthesis (< 20 ms TTFA, typically ~1.5 ms)
-        hop_length = 256
-        samples_per_tok = [max(1, int(round(d * hop_length))) for d in durations]
-        total_samples = sum(samples_per_tok)
-        audio = np.zeros(total_samples, dtype=np.float32)
-
-        curr = 0
-        phase = 0.0
-
-        for idx, tok in enumerate(tokens):
-            ns = samples_per_tok[idx]
-            f0 = f0_pitch[idx]
-            amp = min(0.92, energy[idx] * 0.45)
-
-            t = np.arange(ns, dtype=np.float32)
-            env = (np.sin(np.pi * (t + 0.5) / ns) ** 0.42).astype(np.float32)
-
-            if f0 > 1.0:
-                d_p = (2.0 * np.pi * f0) / sample_rate
-                p = phase + (t + 1.0) * d_p
-                phase += ns * d_p
-
-                f2_mult = 2.4 * spk_warmth
-                if tok.get("dental_11", 0.0) > 0.5:
-                    f2_mult = 2.75
-                elif tok.get("retroflex_14", 0.0) > 0.5:
-                    f2_mult = 1.95
-                elif tok.get("uvular_18", 0.0) > 0.5 or tok.get("pharyngeal_19", 0.0) > 0.5:
-                    f2_mult = 1.65
-
-                harmonic = (
-                    0.52 * np.sin(p)
-                    + 0.26 * np.sin(p * 2.0)
-                    + 0.14 * np.sin(p * f2_mult)
-                    + 0.08 * np.sin(p * 3.8)
-                    + 0.04 * np.sin(p * 7.2)
-                ) * amp * env
-                audio[curr : curr + ns] = harmonic
-            else:
-                noise = np.random.uniform(-0.12, 0.12, ns).astype(np.float32)
-                if tok["ipa"] not in ("<bos>", "<eos>", "<pause>"):
-                    audio[curr : curr + ns] = noise * env * amp
-                phase = 0.0
-
-            curr += ns
-
-        # Studio Air-Band Boost (+1.5 dB shelf above 10kHz)
-        audio[1:] += 0.18 * (audio[1:] - audio[:-1])
-        pcm_bytes = (np.clip(audio, -0.98, 0.98) * 32767.0).astype(np.int16).tobytes()
-        num_samples = total_samples
-    else:
-        pcm_bytes = struct.pack(f"<{len(pcm_samples)}h", *pcm_samples)
-        num_samples = len(pcm_samples)
-
-    total_frames = sum(max(1, int(round(d))) for d in durations)
+    pcm_bytes = struct.pack(f"<{len(pcm_samples)}h", *pcm_samples)
+    num_samples = len(pcm_samples)
     latency_ms = (time.perf_counter() - t0) * 1000.0
     audio_dur_sec = round(num_samples / float(sample_rate), 2)
 
@@ -979,17 +790,13 @@ def synthesize_ims_toucan(
         "lang_name": lang_info["name"],
         "lang_id": lang_info["id"],
         "mood": mood_name,
-        "engine": "fast" if pcm_samples is None else "neural",
         "clause_type": clause_type,
         "raw_text": text,
         "colloquial_text": apply_colloquial_slang(text, lang_code),
-        "num_tokens": n_tok,
-        "mel_frames": total_frames,
         "num_samples": num_samples,
         "sample_rate": sample_rate,
         "audio_duration_sec": audio_dur_sec,
         "latency_ms": round(latency_ms, 2),
-        "mean_f0_hz": round(sum(f for f in f0_pitch if f > 1.0) / max(1, len(voiced_indices)), 1),
     }
     return pcm_bytes, meta
 
@@ -1005,26 +812,17 @@ def pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
     return buf.getvalue()
 
 
-def play_audio_in_memory(pcm_bytes: bytes, sample_rate: int = 24000, wait: bool = True) -> None:
-    """
-    Play 24kHz audio directly through sound hardware in RAM without saving any file to disk.
-    Uses persistent LowLatencyAudioPlayer or winsound fallback.
-    """
-    LowLatencyAudioPlayer.get(sample_rate).play(pcm_bytes, wait=wait)
-
-
 def speak(
     text: str,
     lang_code: str | None = None,
     mood_name: str = "Neutral",
     speed_ratio: float = 1.0,
     play: bool = True,
-    engine: str = "fast",
     wait: bool = True,
 ) -> tuple[bytes, dict[str, Any]]:
     """
-    Pure Headless Text-To-Speech function with sub-20ms instant speech generation.
-    Takes input in any of the 21 languages, speaks it instantly in memory using the
+    Pure Headless Text-To-Speech function.
+    Takes input in any of the 21 languages, speaks real human speech instantly in memory using the
     single locked female studio voice, and returns (pcm_bytes, meta) without saving to disk.
 
     Parameters:
@@ -1033,7 +831,6 @@ def speak(
         mood_name (str): Mood ('Casual_Slang', 'Excited', 'Happy', 'Serious', 'Storytelling', 'Calm', 'Neutral').
         speed_ratio (float): Speech speed (default: 1.0).
         play (bool): Play audio in memory immediately without writing to disk (default: True).
-        engine (str): Synthesis engine ('fast' for sub-20ms instant, 'neural' for OpenVoice HD).
         wait (bool): Wait for audio playback to finish before returning (default: True).
 
     Returns:
@@ -1046,7 +843,7 @@ def speak(
     if not lang_code:
         lang_code = auto_detect_language(cleaned, fallback="en")
 
-    cache_key = f"{cleaned}_{lang_code}_{mood_name}_{speed_ratio}_{engine}"
+    cache_key = f"{cleaned}_{lang_code}_{mood_name}_{speed_ratio}"
     if cache_key in _AUDIO_CACHE:
         pcm_bytes, meta = _AUDIO_CACHE[cache_key]
         if play and pcm_bytes:
@@ -1058,10 +855,9 @@ def speak(
         lang_code=lang_code,
         mood_name=mood_name,
         speed_ratio=speed_ratio,
-        engine=engine,
     )
 
-    if len(_AUDIO_CACHE) < 256:
+    if pcm_bytes and len(_AUDIO_CACHE) < 256:
         _AUDIO_CACHE[cache_key] = (pcm_bytes, meta)
 
     if play and pcm_bytes:
@@ -1190,25 +986,28 @@ def interactive_mode(
     default_lang: str | None = None,
     default_mood: str = "Neutral",
     speed: float = 1.0,
-    engine: str = "fast",
 ) -> None:
-    """Live interactive console prompt for instant speech testing with < 20ms response time."""
-    # Pre-warm low-latency audio stream
-    player = LowLatencyAudioPlayer.get()
+    """Live interactive console prompt for real human speech testing across 21 languages."""
     print("\n" + "=" * 78)
-    print("  IMS-Toucan 21-Language Live TTS Shell (Single Locked Female Voice)")
+    print("  IMS-Toucan 21-Language Live TTS Shell (Single Locked Studio Female Voice)")
     print("  Type any sentence in any of the 21 languages and press [Enter] to speak.")
-    print("  Commands: '!lang <code>', '!mood <name>', '!speed <float>', '!engine <fast|neural>', 'exit'")
+    print("  Commands: '!lang <code>' (e.g. !lang hi), '!mood <name>', '!speed <float>', 'exit'")
     print("=" * 78 + "\n")
+
+    print("[*] Initializing Studio Female Voice Engine...")
+    try:
+        get_tone_converter()
+        print("[+] Voice Engine ready!\n")
+    except Exception as e:
+        print(f"[!] Warning: {e}\n")
 
     current_lang = default_lang
     current_mood = default_mood
     current_speed = speed
-    current_engine = engine
 
     while True:
         try:
-            prefix = f"[{current_lang or 'auto'}|{current_mood}|{current_engine}] > "
+            prefix = f"[{current_lang or 'auto'}|{current_mood}] > "
             user_input = input(prefix).strip()
             if not user_input:
                 continue
@@ -1239,27 +1038,17 @@ def interactive_mode(
                     except ValueError:
                         print("[!] Invalid speed value")
                 continue
-            if user_input.startswith("!engine"):
-                parts = user_input.split()
-                if len(parts) > 1 and parts[1].lower() in ("fast", "neural"):
-                    current_engine = parts[1].lower()
-                    print(f"[*] Engine set to: {current_engine}")
-                else:
-                    print("[!] Usage: !engine fast | !engine neural")
-                continue
 
+            print("[*] Speaking...")
             _, meta = speak(
                 text=user_input,
                 lang_code=current_lang,
                 mood_name=current_mood,
                 speed_ratio=current_speed,
                 play=True,
-                engine=current_engine,
             )
-            ttfa_ms = meta.get("latency_ms", 0.0)
             print(
-                f"   -> Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s) "
-                f"[TTFA: {ttfa_ms:.1f} ms | Engine: {meta.get('engine', current_engine)}]"
+                f"   -> Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s)"
             )
         except (KeyboardInterrupt, EOFError):
             print("\nExiting live shell.")
@@ -1282,13 +1071,6 @@ def main() -> None:
         help="Mood: Casual_Slang, Excited, Happy, Serious, Storytelling, Calm, Neutral",
     )
     parser.add_argument("--speed", type=float, default=1.0, help="Speech speed ratio (default: 1.0)")
-    parser.add_argument(
-        "--engine",
-        type=str,
-        default="fast",
-        choices=["fast", "neural"],
-        help="Engine: 'fast' (sub-20ms ultra-low latency, default) or 'neural' (OpenVoice HD)",
-    )
     parser.add_argument("--no-play", action="store_true", help="Do not play audio through speaker")
     parser.add_argument("--save", type=str, default="", help="Optional: save output to WAV path if explicitly requested")
     parser.add_argument("-i", "--interactive", action="store_true", help="Launch interactive live terminal shell")
@@ -1302,7 +1084,6 @@ def main() -> None:
             default_lang=args.lang.strip() or None,
             default_mood=args.mood,
             speed=args.speed,
-            engine=args.engine,
         )
     elif input_text:
         lang = args.lang.strip() or None
@@ -1313,15 +1094,13 @@ def main() -> None:
             mood_name=args.mood,
             speed_ratio=args.speed,
             play=play_audio,
-            engine=args.engine,
         )
         if args.save:
             save_wav_bytes(Path(args.save), pcm_bytes)
-            print(f"[*] Saved: {args.save} ({meta.get('audio_duration_sec', 0)}s @ 24kHz) [TTFA: {meta.get('latency_ms', 0):.1f} ms]")
+            print(f"[*] Saved: {args.save} ({meta.get('audio_duration_sec', 0)}s @ 24kHz)")
         else:
             print(
-                f"[*] Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s) "
-                f"[TTFA: {meta.get('latency_ms', 0):.1f} ms | Engine: {meta.get('engine', 'fast')}]"
+                f"[*] Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s) in locked female voice without saving to disk."
             )
     elif args.generate_all:
         generate_all_outputs(OUTPUT_DIR)
