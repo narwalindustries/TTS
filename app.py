@@ -1069,6 +1069,57 @@ def generate_all_outputs(output_dir: Path) -> list[dict[str, Any]]:
     return manifest_records
 
 
+def interactive_mode(default_lang: str | None = None, default_mood: str = "Neutral", speed: float = 1.0) -> None:
+    """Live interactive console prompt for instant speech testing."""
+    print("\n" + "=" * 75)
+    print("  IMS-Toucan 21-Language Live TTS Shell (Single Locked Female Voice)")
+    print("  Type any sentence in any of the 21 languages and press [Enter] to speak.")
+    print("  Commands: '!lang <code>' (e.g. !lang hi), '!mood <name>', or 'exit' to quit.")
+    print("=" * 75 + "\n")
+
+    current_lang = default_lang
+    current_mood = default_mood
+
+    while True:
+        try:
+            prefix = f"[{current_lang or 'auto'}|{current_mood}] > "
+            user_input = input(prefix).strip()
+            if not user_input:
+                continue
+            if user_input.lower() in ("exit", "quit", "q"):
+                print("Exiting live shell.")
+                break
+            if user_input.startswith("!lang"):
+                parts = user_input.split()
+                if len(parts) > 1:
+                    current_lang = parts[1].strip().lower()
+                    print(f"[*] Language set to: {current_lang}")
+                else:
+                    current_lang = None
+                    print("[*] Language set to auto-detect")
+                continue
+            if user_input.startswith("!mood"):
+                parts = user_input.split()
+                if len(parts) > 1:
+                    current_mood = parts[1].strip()
+                    print(f"[*] Mood set to: {current_mood}")
+                continue
+
+            _, meta = speak(
+                text=user_input,
+                lang_code=current_lang,
+                mood_name=current_mood,
+                speed_ratio=speed,
+                play=True,
+            )
+            print(f"   -> Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s)")
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting live shell.")
+            break
+        except Exception as e:
+            print(f"[!] Error: {e}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="IMS-Toucan 21-Language Single-Voice Headless Speech Synthesizer (No GUI, In-Memory Speech)"
@@ -1085,12 +1136,19 @@ def main() -> None:
     parser.add_argument("--speed", type=float, default=1.0, help="Speech speed ratio (default: 1.0)")
     parser.add_argument("--no-play", action="store_true", help="Do not play audio through speaker")
     parser.add_argument("--save", type=str, default="", help="Optional: save output to WAV path if explicitly requested")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Launch interactive live terminal shell")
     parser.add_argument("--generate-all", action="store_true", help="Batch generate all 21 languages and 7 moods to output/")
     args = parser.parse_args()
 
     input_text = args.text.strip() or args.positional_text.strip()
 
-    if input_text:
+    if args.interactive or (not input_text and not args.generate_all):
+        interactive_mode(
+            default_lang=args.lang.strip() or None,
+            default_mood=args.mood,
+            speed=args.speed,
+        )
+    elif input_text:
         lang = args.lang.strip() or None
         play_audio = not args.no_play
         pcm_bytes, meta = speak(
@@ -1107,8 +1165,6 @@ def main() -> None:
             print(f"[*] Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s) in locked female voice without saving to disk.")
     elif args.generate_all:
         generate_all_outputs(OUTPUT_DIR)
-    else:
-        parser.print_help()
 
 
 if __name__ == "__main__":
