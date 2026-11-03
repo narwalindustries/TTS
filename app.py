@@ -716,23 +716,7 @@ def split_into_clauses(text: str, lang_code: str = "en") -> list[str]:
         merged.append(seg)
         i += 1
 
-    final_clauses: list[str] = []
-    for clause in (merged or [cleaned]):
-        words = clause.split()
-        if len(words) > 8 and ("," in clause or "،" in clause):
-            sub = [s.strip() for s in re.split(r'([,،]+)', clause) if s.strip()]
-            j = 0
-            while j < len(sub):
-                s = sub[j]
-                if j + 1 < len(sub) and re.match(r'^[,،]+$', sub[j + 1]):
-                    s += sub[j + 1]
-                    j += 1
-                final_clauses.append(s)
-                j += 1
-        else:
-            final_clauses.append(clause)
-
-    return final_clauses or [cleaned]
+    return merged or [cleaned]
 
 
 def get_tone_converter():
@@ -871,7 +855,10 @@ def play_audio_in_memory(pcm_bytes: bytes, sample_rate: int = 24000, wait: bool 
         import winsound
 
         wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate)
-        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+        flags = winsound.SND_MEMORY
+        if not wait:
+            flags |= winsound.SND_ASYNC
+        winsound.PlaySound(wav_bytes, flags)
     except Exception as e:
         print(f"[Playback notification]: {e}")
 
@@ -986,102 +973,25 @@ def speak(
             "num_samples": len(pcm_bytes) // 2,
             "sample_rate": 24000,
             "audio_duration_sec": round(len(pcm_bytes) / 48000.0, 2),
-            "streaming": True,
+            "streaming": False,
             "num_clauses": 1,
         }
         if play:
             play_audio_in_memory(pcm_bytes, sample_rate=24000, wait=wait)
         return pcm_bytes, meta
 
-    clauses = split_into_clauses(cleaned, lang_code)
-    if not clauses:
+    # Synthesize complete utterance smoothly for live human reading without gaps or word-by-word stutter
+    pcm_bytes, meta = synthesize_ims_toucan(cleaned, lang_code, mood_name, speed_ratio)
+    if not pcm_bytes:
         return b"", {}
 
-    # If single clause and no playback, synthesize directly
-    if len(clauses) == 1 and not play:
-        pcm_bytes, meta = synthesize_ims_toucan(clauses[0], lang_code, mood_name, speed_ratio)
-        if pcm_bytes and len(_AUDIO_CACHE) < 256:
-            _AUDIO_CACHE[cache_key] = (pcm_bytes, meta)
-        return pcm_bytes, meta
+    if len(_AUDIO_CACHE) < 256:
+        _AUDIO_CACHE[cache_key] = (pcm_bytes, meta)
 
-    # Streaming mode for instant Time-To-First-Audio (< 20 ms)
-    player = StreamPlayer(sample_rate=24000) if play else None
-    first_clause = clauses[0]
-    first_w = first_clause.split()[0].strip(".,!?;:।؟").lower() if first_clause.split() else ""
-    word_key = f"{lang_code}_{first_w}"
+    if play:
+        play_audio_in_memory(pcm_bytes, sample_rate=24000, wait=wait)
 
-    collected_pcm: list[bytes] = []
-
-    # If first word or clause is in prefix cache, play instantly (< 1ms)
-    if word_key in prefix_cache and len(first_clause.split()) > 1:
-        lead_pcm = prefix_cache[word_key]
-        collected_pcm.append(lead_pcm)
-        if player:
-            player.put(lead_pcm)
-        remainder_first = first_clause[len(first_clause.split()[0]):].strip()
-        remaining_clauses = [remainder_first] + clauses[1:]
-    else:
-        # Novel uncached starter: engage audio DAC immediately with vocal presence buffer (<15ms)
-        if player:
-            player.put(get_vocal_presence_buffer(30))
-        chunk0_pcm, _ = synthesize_ims_toucan(first_clause, lang_code, mood_name, speed_ratio)
-        if chunk0_pcm:
-            collected_pcm.append(chunk0_pcm)
-            if player:
-                player.put(chunk0_pcm)
-        remaining_clauses = clauses[1:]
-
-    # Synthesize remaining clauses in background thread pipelined
-    def _producer():
-        for clause in remaining_clauses:
-            if not clause or not clause.strip():
-                continue
-            pcm, _ = synthesize_ims_toucan(clause, lang_code, mood_name, speed_ratio)
-            if pcm:
-                collected_pcm.append(pcm)
-                if player:
-                    player.put(pcm)
-        if player:
-            player.finish(wait=False)
-
-    if remaining_clauses:
-        if play:
-            prod_thread = threading.Thread(target=_producer, daemon=True)
-            prod_thread.start()
-            if wait:
-                prod_thread.join()
-                if player:
-                    player.finish(wait=True)
-        else:
-            _producer()
-    else:
-        if player:
-            player.finish(wait=wait)
-
-    full_pcm = b"".join(collected_pcm)
-    lang_info = next((l for l in LANGUAGES if l["code"] == lang_code), LANGUAGES[0])
-    num_samples = len(full_pcm) // 2
-    audio_dur_sec = round(num_samples / 24000.0, 2)
-
-    meta = {
-        "lang_code": lang_info["code"],
-        "lang_name": lang_info["name"],
-        "lang_id": lang_info["id"],
-        "mood": mood_name,
-        "clause_type": detect_clause_type(cleaned),
-        "raw_text": cleaned,
-        "colloquial_text": apply_colloquial_slang(cleaned, lang_code),
-        "num_samples": num_samples,
-        "sample_rate": 24000,
-        "audio_duration_sec": audio_dur_sec,
-        "streaming": True,
-        "num_clauses": len(clauses),
-    }
-
-    if full_pcm and len(_AUDIO_CACHE) < 256:
-        _AUDIO_CACHE[cache_key] = (full_pcm, meta)
-
-    return full_pcm, meta
+    return pcm_bytes, meta
 
 
 def save_wav_bytes(out_path: Path, pcm_bytes: bytes, sample_rate: int = 24000) -> None:
@@ -1212,12 +1122,11 @@ def interactive_mode(
     print("  Commands: '!lang <code>' (e.g. !lang hi), '!mood <name>', '!speed <float>', 'exit'")
     print("=" * 78 + "\n")
 
-    print("[*] Initializing Studio Female Voice Engine (Sub-20ms Streaming Pipeline)...")
+    print("[*] Initializing Studio Female Voice Engine (Fluent Human Live Reading)...")
     try:
         get_tone_converter()
         load_prefix_cache()
-        StreamPlayer(sample_rate=24000).finish(wait=False)
-        print("[+] Voice Engine ready! Sub-20ms Time-To-First-Audio active across all 21 languages.\n")
+        print("[+] Voice Engine ready! Single Locked Studio Female Voice active across all 21 languages.\n")
     except Exception as e:
         print(f"[!] Warning: {e}\n")
 

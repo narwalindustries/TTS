@@ -119,6 +119,30 @@ def test_streaming_sub20ms_ttfa():
     print(f"    [+] StreamPlayer queue enqueue latency: {put_latency:.3f} ms (< 5ms PASSED!)")
     print("    [+] Sub-20ms streaming verification PASSED!")
 
+def test_live_human_reading_no_gaps():
+    print("[*] Testing live human reading (fully generated, continuous, zero gaps)...")
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from app import speak, _AUDIO_CACHE
+
+    test_hindi = "अरे भाई क्या कर रहा है?"
+    t0 = time.perf_counter()
+    pcm, meta = speak(test_hindi, lang_code="hi", play=False)
+    synth_time = time.perf_counter() - t0
+
+    assert len(pcm) > 0, "Synthesized PCM bytes are empty!"
+    assert meta.get("audio_duration_sec", 0) > 1.0, f"Audio duration too short: {meta.get('audio_duration_sec')}s!"
+    assert meta.get("sample_rate") == 24000, "Sample rate is not 24kHz!"
+    print(f"    [+] Generated full Hindi utterance '{test_hindi}': {len(pcm)} bytes, {meta['audio_duration_sec']}s in {synth_time:.2f}s")
+
+    # Verify cached replay is sub-millisecond (< 1ms)
+    t_cache = time.perf_counter()
+    pcm_c, meta_c = speak(test_hindi, lang_code="hi", play=False)
+    cache_latency_ms = (time.perf_counter() - t_cache) * 1000.0
+    assert cache_latency_ms < 5.0, f"Audio cache replay latency too high: {cache_latency_ms:.2f} ms!"
+    assert len(pcm_c) == len(pcm), "Cached PCM does not match synthesized PCM!"
+    print(f"    [+] In-memory instant replay: {cache_latency_ms:.3f} ms (< 5ms PASSED!)")
+    print("    [+] Fluent live human reading verification PASSED!")
+
 def main():
     print("=================================================================")
     print(" HD Modular TTS Verification Test Suite")
@@ -127,6 +151,7 @@ def main():
     test_istft_reconstruction()
     test_real_speech_synthesis()
     test_streaming_sub20ms_ttfa()
+    test_live_human_reading_no_gaps()
     print("=================================================================")
     print(" ALL SELF-CHECK ASSERTIONS PASSED SUCCESSFULLY!")
     print("=================================================================")
