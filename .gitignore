@@ -1,0 +1,20 @@
+# Build artifacts
+build_android/CMakeFiles/
+build_android/CMakeCache.txt
+build_android/cmake_install.cmake
+build_android/build.ninja
+build_android/.ninja*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.bak

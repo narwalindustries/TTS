@@ -1,0 +1,35 @@
+7767517
+33 32
+pnnx.Input               pnnx_input_0             0 1 0 #0=(1,32)i64
+pnnx.Input               pnnx_input_1             0 1 1 #1=(1)i64
+nn.Embedding             phoneme_emb              1 1 0 2 embedding_dim=192 num_embeddings=512 sparse=False @weight=(512,192)f32 #0=(1,32)i64 #2=(1,32,192)f32
+nn.Embedding             lang_emb                 1 1 1 3 embedding_dim=192 num_embeddings=32 sparse=False @weight=(32,192)f32 #1=(1)i64 #3=(1,192)f32
+torch.unsqueeze          torch.unsqueeze_1        1 1 3 4 dim=1 $input=3 #3=(1,192)f32 #4=(1,1,192)f32
+pnnx.Expression          pnnx_expr_9              2 1 2 4 5 expr=add(@0,@1) #2=(1,32,192)f32 #4=(1,1,192)f32 #5=(1,32,192)f32
+torch.transpose          torch.transpose_0        1 1 5 6 dim0=1 dim1=2 $input=5 #5=(1,32,192)f32 #6=(1,192,32)f32
+nn.Conv1d                encoder_blocks.0.dwconv  1 1 6 7 bias=True dilation=(1) groups=192 in_channels=192 kernel_size=(7) out_channels=192 padding=(3) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,1,7)f32 #6=(1,192,32)f32 #7=(1,192,32)f32
+nn.GroupNorm             encoder_blocks.0.norm    1 1 7 8 affine=True eps=1.000000e-6 num_channels=192 num_groups=1 @bias=(192)f32 @weight=(192)f32 #7=(1,192,32)f32 #8=(1,192,32)f32
+nn.Conv1d                encoder_blocks.0.pwconv1 1 1 8 9 bias=True dilation=(1) groups=1 in_channels=192 kernel_size=(1) out_channels=768 padding=(0) padding_mode=zeros stride=(1) @bias=(768)f32 @weight=(768,192,1)f32 #8=(1,192,32)f32 #9=(1,768,32)f32
+nn.GELU                  encoder_blocks.0.act     1 1 9 10 #9=(1,768,32)f32 #10=(1,768,32)f32
+nn.Conv1d                encoder_blocks.0.pwconv2 1 1 10 11 bias=True dilation=(1) groups=1 in_channels=768 kernel_size=(1) out_channels=192 padding=(0) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,768,1)f32 #10=(1,768,32)f32 #11=(1,192,32)f32
+pnnx.Expression          pnnx_expr_6              2 1 6 11 12 expr=add(@0,@1) #6=(1,192,32)f32 #11=(1,192,32)f32 #12=(1,192,32)f32
+nn.Conv1d                encoder_blocks.1.dwconv  1 1 12 13 bias=True dilation=(1) groups=192 in_channels=192 kernel_size=(7) out_channels=192 padding=(3) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,1,7)f32 #12=(1,192,32)f32 #13=(1,192,32)f32
+nn.GroupNorm             encoder_blocks.1.norm    1 1 13 14 affine=True eps=1.000000e-6 num_channels=192 num_groups=1 @bias=(192)f32 @weight=(192)f32 #13=(1,192,32)f32 #14=(1,192,32)f32
+nn.Conv1d                encoder_blocks.1.pwconv1 1 1 14 15 bias=True dilation=(1) groups=1 in_channels=192 kernel_size=(1) out_channels=768 padding=(0) padding_mode=zeros stride=(1) @bias=(768)f32 @weight=(768,192,1)f32 #14=(1,192,32)f32 #15=(1,768,32)f32
+nn.GELU                  encoder_blocks.1.act     1 1 15 16 #15=(1,768,32)f32 #16=(1,768,32)f32
+nn.Conv1d                encoder_blocks.1.pwconv2 1 1 16 17 bias=True dilation=(1) groups=1 in_channels=768 kernel_size=(1) out_channels=192 padding=(0) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,768,1)f32 #16=(1,768,32)f32 #17=(1,192,32)f32
+pnnx.Expression          pnnx_expr_4              2 1 12 17 18 expr=add(@0,@1) #12=(1,192,32)f32 #17=(1,192,32)f32 #18=(1,192,32)f32
+nn.Conv1d                encoder_blocks.2.dwconv  1 1 18 19 bias=True dilation=(1) groups=192 in_channels=192 kernel_size=(7) out_channels=192 padding=(3) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,1,7)f32 #18=(1,192,32)f32 #19=(1,192,32)f32
+nn.GroupNorm             encoder_blocks.2.norm    1 1 19 20 affine=True eps=1.000000e-6 num_channels=192 num_groups=1 @bias=(192)f32 @weight=(192)f32 #19=(1,192,32)f32 #20=(1,192,32)f32
+nn.Conv1d                encoder_blocks.2.pwconv1 1 1 20 21 bias=True dilation=(1) groups=1 in_channels=192 kernel_size=(1) out_channels=768 padding=(0) padding_mode=zeros stride=(1) @bias=(768)f32 @weight=(768,192,1)f32 #20=(1,192,32)f32 #21=(1,768,32)f32
+nn.GELU                  encoder_blocks.2.act     1 1 21 22 #21=(1,768,32)f32 #22=(1,768,32)f32
+nn.Conv1d                encoder_blocks.2.pwconv2 1 1 22 23 bias=True dilation=(1) groups=1 in_channels=768 kernel_size=(1) out_channels=192 padding=(0) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,768,1)f32 #22=(1,768,32)f32 #23=(1,192,32)f32
+pnnx.Expression          pnnx_expr_2              2 1 18 23 24 expr=add(@0,@1) #18=(1,192,32)f32 #23=(1,192,32)f32 #24=(1,192,32)f32
+nn.Conv1d                encoder_blocks.3.dwconv  1 1 24 25 bias=True dilation=(1) groups=192 in_channels=192 kernel_size=(7) out_channels=192 padding=(3) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,1,7)f32 #24=(1,192,32)f32 #25=(1,192,32)f32
+nn.GroupNorm             encoder_blocks.3.norm    1 1 25 26 affine=True eps=1.000000e-6 num_channels=192 num_groups=1 @bias=(192)f32 @weight=(192)f32 #25=(1,192,32)f32 #26=(1,192,32)f32
+nn.Conv1d                encoder_blocks.3.pwconv1 1 1 26 27 bias=True dilation=(1) groups=1 in_channels=192 kernel_size=(1) out_channels=768 padding=(0) padding_mode=zeros stride=(1) @bias=(768)f32 @weight=(768,192,1)f32 #26=(1,192,32)f32 #27=(1,768,32)f32
+nn.GELU                  encoder_blocks.3.act     1 1 27 28 #27=(1,768,32)f32 #28=(1,768,32)f32
+nn.Conv1d                encoder_blocks.3.pwconv2 1 1 28 29 bias=True dilation=(1) groups=1 in_channels=768 kernel_size=(1) out_channels=192 padding=(0) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,768,1)f32 #28=(1,768,32)f32 #29=(1,192,32)f32
+pnnx.Expression          pnnx_expr_0              2 1 24 29 30 expr=add(@0,@1) #24=(1,192,32)f32 #29=(1,192,32)f32 #30=(1,192,32)f32
+nn.Conv1d                proj                     1 1 30 31 bias=True dilation=(1) groups=1 in_channels=192 kernel_size=(1) out_channels=192 padding=(0) padding_mode=zeros stride=(1) @bias=(192)f32 @weight=(192,192,1)f32 #30=(1,192,32)f32 #31=(1,192,32)f32
+pnnx.Output              pnnx_output_0            1 0 31 #31=(1,192,32)f32
