@@ -78,7 +78,7 @@
                     m_f0 = m;
                 } else if (std::string(name) == "energy") {
                     m_energy = m;
-                } else if (std::string(name) == "spec_converted" || std::string(name) == "mel_spec") {
+                } else if (std::string(name) == "spec_converted" || std::string(name) == "mel_spec" || std::string(name) == "in0") {
                     m_mel = m;
                 }
             }
@@ -120,11 +120,11 @@
                             m.row(b)[t] = en_v * 0.25f * std::cos(0.01f * f0_v + 0.1f * b);
                         }
                     }
-                } else if (sname == "mag" || sname == "phase_x" || sname == "phase_y") {
+                } else if (sname == "mag" || sname == "out0" || sname == "phase_x" || sname == "out1" || sname == "phase_y" || sname == "out2") {
                     int T = (m_mel.w > 0) ? m_mel.w : 32;
                     m = Mat(T, 513, 1);
                     for (size_t i = 0; i < m.m_storage.size(); ++i) {
-                        m.m_storage[i] = (sname == "mag") ? 0.04f : 0.70710678f;
+                        m.m_storage[i] = (sname == "mag" || sname == "out0") ? 0.04f : 0.70710678f;
                     }
                 }
             }
@@ -590,11 +590,21 @@ bool HDModularTTSEngine::runVocosBackbone(const ncnn::Mat& spec_features,
     ncnn::Extractor ex = m_net_vocos->create_extractor();
 
     ex.input("spec_converted", spec_features);
+    ex.input("in0", spec_features);
 
     ex.extract("mag", out_mag);
+    if (out_mag.empty()) {
+        ex.extract("out0", out_mag);
+    }
     ex.extract("phase_x", out_phase_x);
+    if (out_phase_x.empty()) {
+        ex.extract("out1", out_phase_x);
+    }
     ex.extract("phase_y", out_phase_y);
-    return true;
+    if (out_phase_y.empty()) {
+        ex.extract("out2", out_phase_y);
+    }
+    return !out_mag.empty();
 }
 
 // ============================================================================
@@ -644,26 +654,26 @@ void HDModularTTSEngine::radix2IFFT(float* real, float* imag, int n) {
 }
 
 void HDModularTTSEngine::refineSpectrumSIMD(float* mag, float* phase_x, float* phase_y, int num_bins) {
+    // Ensure phase vector is strictly normalized on the unit circle
     constexpr float eps = 1e-8f;
     for (int k = 0; k < num_bins; ++k) {
-        // 1. Unit-Circle Phase Normalization via inv_sqrt(x*x + y*y + 1e-8f)
-        //    Eliminates all FP16 metallic phase jitter before multiplying by magnitude
-        float inv_norm = 1.0f / std::sqrt(phase_x[k] * phase_x[k] + phase_y[k] * phase_y[k] + eps);
-        float ux = phase_x[k] * inv_norm;
-        float uy = phase_y[k] * inv_norm;
+        float norm = 1.0f / std::sqrt(phase_x[k] * phase_x[k] + phase_y[k] * phase_y[k] + eps);
+        float ux = phase_x[k] * norm;
+        float uy = phase_y[k] * norm;
 
-        // 2. +1.5 dB Studio Air-Band Boost (FFT bins 300..480: 7 kHz - 11.2 kHz @ 24kHz SR)
-        //    and DC/rumble attenuation (bins 0..3 by 0.25f)
-        float gain = 1.0f;
-        if (k >= 300 && k <= 480) {
-            gain = 1.18f; // +1.5 dB studio air presence boost
-        } else if (k <= 3) {
-            gain = 0.25f; // Attenuate DC/sub-70Hz rumble bins 0..3
+        // If magnitude indicates an unvoiced frame / silence / NaN, kill phase ringing
+        float m = mag[k];
+        if (m < 0.01f || std::isnan(m)) {
+            phase_x[k] = 0.0f;
+            phase_y[k] = 0.0f;
+        } else {
+            // +1.5 dB Studio Air-Band Boost (FFT bins 300..480: 7 kHz - 11.2 kHz @ 24kHz SR)
+            // and DC/rumble attenuation (bins 0..3 by 0.25f)
+            float gain = (k >= 300 && k <= 480) ? 1.18f : ((k <= 3) ? 0.25f : 1.0f);
+            float clean_mag = std::min(m, 100.0f) * gain;
+            phase_x[k] = clean_mag * ux; // Real part for Radix-2 iFFT
+            phase_y[k] = clean_mag * uy; // Imag part for Radix-2 iFFT
         }
-
-        float clean_mag = std::min(mag[k], 100.0f) * gain;
-        phase_x[k] = clean_mag * ux; // Real part for Radix-2 iFFT
-        phase_y[k] = clean_mag * uy; // Imag part for Radix-2 iFFT
     }
 }
 
@@ -726,16 +736,8 @@ void HDModularTTSEngine::computeISTFT(const std::vector<float>& mag,
         std::copy_n(&phase_x[t * num_bins], num_bins, work_px.data());
         std::copy_n(&phase_y[t * num_bins], num_bins, work_py.data());
 
-        // Step 7 DSP Lines:
-        // 1. Unit-Circle Phase Normalization: inv_sqrt(x*x + y*y + 1e-8f) before multiplying by magnitude
-        // 2. +1.5 dB Studio Air-Band Boost: bins 300..480 * 1.18f, DC/rumble bins 0..3 * 0.25f
-        for (int k = 0; k < num_bins; ++k) {
-            float inv_norm = 1.0f / std::sqrt(work_px[k] * work_px[k] + work_py[k] * work_py[k] + 1e-8f);
-            float gain = (k >= 300 && k <= 480) ? 1.18f : ((k <= 3) ? 0.25f : 1.0f);
-            float clean_mag = std::min(work_mag[k], 100.0f) * gain;
-            work_px[k] = clean_mag * (work_px[k] * inv_norm);
-            work_py[k] = clean_mag * (work_py[k] * inv_norm);
-        }
+        // Step 7 DSP: Strict Unit-Circle Phase Normalization & Unvoiced Masking (Eliminates Sinusoidal Trap)
+        refineSpectrumSIMD(work_mag.data(), work_px.data(), work_py.data(), num_bins);
 
         // Construct Hermitian symmetric spectrum
         frame_real[0] = work_px[0];

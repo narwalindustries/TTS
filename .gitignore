@@ -19,3 +19,6 @@ env/
 *.swp
 *.bak
 
+# Audio outputs (In-memory TTS engine does not require local file tracking)
+output/
+outputs/

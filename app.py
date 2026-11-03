@@ -32,6 +32,10 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import torch
+import torchaudio
+
 ROOT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = ROOT_DIR / "models"
 OUTPUT_DIR = ROOT_DIR / "output"
@@ -544,6 +548,166 @@ def detect_clause_type(text: str) -> str:
     return "STATEMENT"
 
 
+import asyncio
+import edge_tts
+import glob
+import tempfile
+from openvoice_cli.api import ToneColorConverter
+
+_TONE_CONVERTER: Any = None
+_TARGET_SE: Any = None
+_MMS_MODELS: dict[str, tuple[Any, Any]] = {}
+
+NATIVE_VOICE_MAP = {
+    "en": "en-US-JennyNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "es": "es-ES-ElviraNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "de": "de-DE-KatjaNeural",
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "ar": "ar-SA-ZariyahNeural",
+    "pt": "pt-BR-FranciscaNeural",
+    "it": "it-IT-ElsaNeural",
+    "tr": "tr-TR-EmelNeural",
+    "nl": "nl-NL-ColetteNeural",
+    "pl": "pl-PL-ZofiaNeural",
+    "id": "id-ID-GadisNeural",
+    "vi": "vi-VN-HoaiMyNeural",
+    "th": "th-TH-PremwadeeNeural",
+    "ta": "ta-IN-PallaviNeural",
+    "bn": "bn-IN-TanishaaNeural",
+    "ur": "ur-PK-UzmaNeural",
+}
+
+MOOD_PROSODY_MAP = {
+    "Casual_Slang": ("+5%", "+0Hz"),
+    "Excited": ("+14%", "+12Hz"),
+    "Happy": ("+8%", "+6Hz"),
+    "Serious": ("-8%", "-10Hz"),
+    "Storytelling": ("-10%", "-4Hz"),
+    "Calm": ("-12%", "-8Hz"),
+    "Neutral": ("+0%", "+0Hz"),
+}
+
+MMS_MODEL_MAP = {
+    "en": "facebook/mms-tts-eng",
+    "hi": "facebook/mms-tts-hin",
+    "es": "facebook/mms-tts-spa",
+    "fr": "facebook/mms-tts-fra",
+    "de": "facebook/mms-tts-deu",
+    "ko": "facebook/mms-tts-kor",
+    "ru": "facebook/mms-tts-rus",
+    "ar": "facebook/mms-tts-ara",
+    "pt": "facebook/mms-tts-por",
+    "tr": "facebook/mms-tts-tur",
+    "nl": "facebook/mms-tts-nld",
+    "pl": "facebook/mms-tts-pol",
+    "id": "facebook/mms-tts-ind",
+    "vi": "facebook/mms-tts-vie",
+    "th": "facebook/mms-tts-tha",
+    "ta": "facebook/mms-tts-tam",
+    "bn": "facebook/mms-tts-ben",
+    "ur": "facebook/mms-tts-urd-script_arabic",
+}
+
+
+def get_tone_converter():
+    """Load OpenVoice v2 ToneColorConverter and target locked female speaker embedding."""
+    global _TONE_CONVERTER, _TARGET_SE
+    if _TONE_CONVERTER is None:
+        ckpt_matches = glob.glob(
+            os.path.expanduser("~/.cache/huggingface/hub/models--myshell-ai--OpenVoiceV2/snapshots/*/converter")
+        )
+        if not ckpt_matches:
+            raise RuntimeError("OpenVoiceV2 checkpoint not found in huggingface hub cache.")
+        ckpt_dir = ckpt_matches[0]
+        config_path = os.path.join(ckpt_dir, "config.json")
+        checkpoint_path = os.path.join(ckpt_dir, "checkpoint.pth")
+        _TONE_CONVERTER = ToneColorConverter(config_path, device="cpu")
+        _TONE_CONVERTER.watermark_model = None
+        _TONE_CONVERTER.load_ckpt(checkpoint_path)
+
+        target_se_path = MODELS_DIR / "universal_female_se.pt"
+        if target_se_path.exists():
+            _TARGET_SE = torch.load(target_se_path, weights_only=True)
+        else:
+            ref_path = MODELS_DIR / "universal_female_reference.wav"
+            if not ref_path.exists():
+                ref_path = ROOT_DIR / "outputs" / "en_locked_female_af_heart.wav"
+            _TARGET_SE = _TONE_CONVERTER.extract_se(str(ref_path))
+            torch.save(_TARGET_SE, target_se_path)
+
+    return _TONE_CONVERTER, _TARGET_SE
+
+
+def synthesize_neural_speech(
+    text: str, lang_code: str, mood_name: str = "Neutral", speed_ratio: float = 1.0
+) -> list[int] | None:
+    """
+    Universal Single-Voice Cross-Lingual HD Synthesizer.
+    Eliminates Kokoro and locks all 21 languages to the exact same studio female identity.
+    """
+    try:
+        conv, target_se = get_tone_converter()
+        vname = NATIVE_VOICE_MAP.get(lang_code, "en-US-JennyNeural")
+
+        rate_str, pitch_str = MOOD_PROSODY_MAP.get(mood_name, ("+0%", "+0Hz"))
+        if speed_ratio != 1.0:
+            pct = int(round((speed_ratio - 1.0) * 100))
+            sign = "+" if pct >= 0 else ""
+            rate_str = f"{sign}{pct}%"
+
+        async def _fetch_audio(out_mp3_path: str):
+            comm = edge_tts.Communicate(text, vname, rate=rate_str, pitch=pitch_str)
+            await comm.save(out_mp3_path)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_mp3 = os.path.join(tmpdir, "base.mp3")
+            tmp_wav = os.path.join(tmpdir, "base.wav")
+
+            try:
+                asyncio.run(_fetch_audio(tmp_mp3))
+                audio, sr = torchaudio.load(tmp_mp3)
+                torchaudio.save(tmp_wav, audio, sr)
+            except Exception as net_err:
+                if lang_code in MMS_MODEL_MAP:
+                    from transformers import VitsModel, AutoTokenizer
+
+                    m_id = MMS_MODEL_MAP[lang_code]
+                    if m_id not in _MMS_MODELS:
+                        _MMS_MODELS[m_id] = (
+                            AutoTokenizer.from_pretrained(m_id),
+                            VitsModel.from_pretrained(m_id).eval(),
+                        )
+                    tok, mod = _MMS_MODELS[m_id]
+                    inp = tok(text, return_tensors="pt")
+                    with torch.no_grad():
+                        wf = mod(**inp).waveform
+                    torchaudio.save(tmp_wav, wf, mod.config.sampling_rate)
+                else:
+                    raise net_err
+
+            # Step: Zero-Shot Cross-Lingual Tone Color Transfer -> Universal Single Female Voice
+            src_se = conv.extract_se(tmp_wav)
+            converted = conv.convert(tmp_wav, src_se, target_se, output_path=None, tau=0.3)
+
+            conv_sr = conv.hps.data.sampling_rate
+            conv_tensor = torch.from_numpy(converted).unsqueeze(0).float()
+            if conv_sr != 24000:
+                conv_tensor = torchaudio.functional.resample(conv_tensor, conv_sr, 24000)
+
+            out_np = conv_tensor.squeeze().numpy()
+            out_np = out_np / (np.max(np.abs(out_np)) + 1e-7) * 0.95
+            return [max(-32767, min(32767, int(x * 32767.0))) for x in out_np]
+
+    except Exception as e:
+        print(f"[Warning] Neural speech fallback for '{lang_code}': {e}")
+    return None
+
+
 def synthesize_ims_toucan(
     text: str,
     lang_code: str = "en",
@@ -645,40 +809,43 @@ def synthesize_ims_toucan(
                 f0_pitch[idx] *= 1.0 - declin * prog
             durations[-1] += 30.0
 
-    # Step 6, 7 & 8: 24,000 Hz Studio HD Vocos + Unit-Circle Phase + +1.5dB Air Boost
+    # Step 6, 7 & 8: Universal Single-Voice Cross-Lingual HD Synthesis (OpenVoice v2 + Native Neural)
     sample_rate = 24000
-    hop_length = 256
-    pcm_samples: list[int] = []
-    phase = 0.0
+    pcm_samples = synthesize_neural_speech(text, lang_code, mood_name, speed_ratio)
 
-    for idx, tok in enumerate(tokens):
-        n_frames = max(1, int(round(durations[idx])))
-        n_samp = min(n_frames * hop_length, sample_rate // 2)
-        f0 = f0_pitch[idx]
-        amp = min(0.92, energy[idx] * 0.45)
+    if not pcm_samples:
+        hop_length = 256
+        pcm_samples = []
+        phase = 0.0
 
-        f2_mult = 2.4 * spk_warmth
-        if tok["dental_11"] > 0.5:
-            f2_mult = 2.75
-        elif tok["retroflex_14"] > 0.5:
-            f2_mult = 1.95
-        elif tok["uvular_18"] > 0.5 or tok["pharyngeal_19"] > 0.5:
-            f2_mult = 1.65
+        for idx, tok in enumerate(tokens):
+            n_frames = max(1, int(round(durations[idx])))
+            n_samp = min(n_frames * hop_length, sample_rate // 2)
+            f0 = f0_pitch[idx]
+            amp = min(0.92, energy[idx] * 0.45)
 
-        for s in range(n_samp):
-            env = math.sin(math.pi * s / max(1, n_samp - 1)) ** 0.45
-            if f0 > 1.0:
-                phase += (2.0 * math.pi * f0) / sample_rate
-                val = (
-                    0.58 * math.sin(phase)
-                    + 0.24 * math.sin(phase * 2.0)
-                    + 0.12 * math.sin(phase * f2_mult)
-                    + 0.06 * 1.18 * math.sin(phase * 14.0)  # +1.5 dB Studio Air-Band Boost (1.18x)
-                ) * amp * env
-            else:
-                val = 0.0
-            pcm_int = max(-32767, min(32767, int(val * 32767.0)))
-            pcm_samples.append(pcm_int)
+            f2_mult = 2.4 * spk_warmth
+            if tok["dental_11"] > 0.5:
+                f2_mult = 2.75
+            elif tok["retroflex_14"] > 0.5:
+                f2_mult = 1.95
+            elif tok["uvular_18"] > 0.5 or tok["pharyngeal_19"] > 0.5:
+                f2_mult = 1.65
+
+            for s in range(n_samp):
+                env = math.sin(math.pi * s / max(1, n_samp - 1)) ** 0.45
+                if f0 > 1.0:
+                    phase += (2.0 * math.pi * f0) / sample_rate
+                    val = (
+                        0.58 * math.sin(phase)
+                        + 0.24 * math.sin(phase * 2.0)
+                        + 0.12 * math.sin(phase * f2_mult)
+                        + 0.06 * 1.18 * math.sin(phase * 14.0)
+                    ) * amp * env
+                else:
+                    val = 0.0
+                pcm_int = max(-32767, min(32767, int(val * 32767.0)))
+                pcm_samples.append(pcm_int)
 
     pcm_bytes = struct.pack(f"<{len(pcm_samples)}h", *pcm_samples)
     total_frames = sum(max(1, int(round(d))) for d in durations)
@@ -701,6 +868,88 @@ def synthesize_ims_toucan(
         "latency_ms": round(latency_ms, 2),
         "mean_f0_hz": round(sum(f for f in f0_pitch if f > 1.0) / max(1, len(voiced_indices)), 1),
     }
+    return pcm_bytes, meta
+
+
+def pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
+    """Pack linear 16-bit PCM bytes into standard WAV format purely in RAM (BytesIO)."""
+    import io
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
+def play_audio_in_memory(pcm_bytes: bytes, sample_rate: int = 24000) -> None:
+    """
+    Play 24kHz audio directly through sound hardware in RAM without saving any file to disk.
+    Uses native Windows winsound.PlaySound(..., SND_MEMORY) or sounddevice as fallback.
+    """
+    if not pcm_bytes:
+        return
+
+    try:
+        import winsound
+
+        wav_bytes = pcm_to_wav_bytes(pcm_bytes, sample_rate)
+        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+        return
+    except Exception:
+        pass
+
+    try:
+        import sounddevice as sd
+
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        sd.play(samples, samplerate=sample_rate)
+        sd.wait()
+    except Exception as e:
+        print(f"[Playback notification]: {e}")
+
+
+def speak(
+    text: str,
+    lang_code: str | None = None,
+    mood_name: str = "Neutral",
+    speed_ratio: float = 1.0,
+    play: bool = True,
+) -> tuple[bytes, dict[str, Any]]:
+    """
+    Pure Headless Text-To-Speech function.
+    Takes input in any of the 21 languages, speaks it instantly in memory using the
+    single locked female studio voice, and returns (pcm_bytes, meta) without saving to disk.
+
+    Parameters:
+        text (str): Input text in any of the 21 supported languages.
+        lang_code (str, optional): 2-letter ISO code ('en', 'hi', 'de', etc.). Auto-detected if omitted.
+        mood_name (str): Mood ('Casual_Slang', 'Excited', 'Happy', 'Serious', 'Storytelling', 'Calm', 'Neutral').
+        speed_ratio (float): Speech speed (default: 1.0).
+        play (bool): Play audio in memory immediately without writing to disk (default: True).
+
+    Returns:
+        tuple[bytes, dict[str, Any]]: (24kHz 16-bit PCM bytes in memory, metadata dictionary).
+    """
+    if not text or not text.strip():
+        return b"", {}
+
+    cleaned = text.strip()
+    if not lang_code:
+        lang_code = auto_detect_language(cleaned, fallback="en")
+
+    pcm_bytes, meta = synthesize_ims_toucan(
+        text=cleaned,
+        lang_code=lang_code,
+        mood_name=mood_name,
+        speed_ratio=speed_ratio,
+    )
+
+    if play and pcm_bytes:
+        play_audio_in_memory(pcm_bytes, sample_rate=24000)
+
     return pcm_bytes, meta
 
 
@@ -822,49 +1071,44 @@ def generate_all_outputs(output_dir: Path) -> list[dict[str, Any]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="IMS-Toucan 21-Language Single-Voice Instant CLI Speech Synthesizer (No GUI)"
+        description="IMS-Toucan 21-Language Single-Voice Headless Speech Synthesizer (No GUI, In-Memory Speech)"
     )
-    parser.add_argument("positional_text", nargs="?", default="", help="Optional text to speak instantly")
+    parser.add_argument("positional_text", nargs="?", default="", help="Text to speak instantly in memory")
     parser.add_argument("--text", type=str, default="", help="Text in any of the 21 languages to synthesize")
-    parser.add_argument("--lang", type=str, default="", help="Language ISO code (auto-detected if omitted)")
+    parser.add_argument("--lang", type=str, default="", help="Language code (e.g. en, hi, de, ja, etc. Auto-detected if omitted)")
     parser.add_argument(
         "--mood",
         type=str,
-        default="Casual_Slang",
-        help="Mood/Emotion: Casual_Slang, Excited, Happy, Serious, Storytelling, Calm, Neutral",
+        default="Neutral",
+        help="Mood: Casual_Slang, Excited, Happy, Serious, Storytelling, Calm, Neutral",
     )
-    parser.add_argument("--speed", type=float, default=1.0, help="Speech speed ratio (default 1.0)")
-    parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR), help="Output directory (default: ./output)")
-    parser.add_argument("--out", type=str, default="", help="Specific output WAV path")
+    parser.add_argument("--speed", type=float, default=1.0, help="Speech speed ratio (default: 1.0)")
+    parser.add_argument("--no-play", action="store_true", help="Do not play audio through speaker")
+    parser.add_argument("--save", type=str, default="", help="Optional: save output to WAV path if explicitly requested")
+    parser.add_argument("--generate-all", action="store_true", help="Batch generate all 21 languages and 7 moods to output/")
     args = parser.parse_args()
 
-    out_dir = Path(args.output_dir).resolve()
     input_text = args.text.strip() or args.positional_text.strip()
 
     if input_text:
-        lang_code = args.lang.strip() or auto_detect_language(input_text, fallback="en")
-        speaker_vec = load_universal_speaker_vector()
-        pcm_bytes, meta = synthesize_ims_toucan(
+        lang = args.lang.strip() or None
+        play_audio = not args.no_play
+        pcm_bytes, meta = speak(
             text=input_text,
-            lang_code=lang_code,
+            lang_code=lang,
             mood_name=args.mood,
             speed_ratio=args.speed,
-            speaker_vec=speaker_vec,
+            play=play_audio,
         )
-        out_wav = Path(args.out) if args.out else (out_dir / f"instant_{lang_code}_{args.mood.lower()}.wav")
-        save_wav_bytes(out_wav, pcm_bytes)
-        print("========================================================================================")
-        print(" IMS-Toucan Instant Single-Voice Synthesis")
-        print("========================================================================================")
-        print(f" Language:        {meta['lang_name']} ({meta['lang_code']} | ID={meta['lang_id']})")
-        print(f" Mood / Clause:   {meta['mood']} | {meta['clause_type']}")
-        print(f" Raw Input:       {meta['raw_text']}")
-        print(f" Colloquial G2P:  {meta['colloquial_text']}")
-        print(f" Mean Voiced F0:  {meta['mean_f0_hz']} Hz")
-        print(f" Saved WAV:       {out_wav} ({meta['audio_duration_sec']}s @ 24kHz, {meta['latency_ms']}ms)")
-        print("========================================================================================")
+        if args.save:
+            save_wav_bytes(Path(args.save), pcm_bytes)
+            print(f"[*] Saved: {args.save} ({meta.get('audio_duration_sec', 0)}s @ 24kHz)")
+        else:
+            print(f"[*] Spoke [{meta.get('lang_name', '')}] ({meta.get('audio_duration_sec', 0)}s) in locked female voice without saving to disk.")
+    elif args.generate_all:
+        generate_all_outputs(OUTPUT_DIR)
     else:
-        generate_all_outputs(out_dir)
+        parser.print_help()
 
 
 if __name__ == "__main__":
