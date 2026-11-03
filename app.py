@@ -593,7 +593,7 @@ NATIVE_VOICE_MAP = {
     "th": "th-TH-PremwadeeNeural",
     "ta": "ta-IN-PallaviNeural",
     "bn": "bn-IN-TanishaaNeural",
-    "ur": "ur-PK-UzmaNeural",
+    "ur": "hi-IN-SwaraNeural",
 }
 
 MOOD_PROSODY_MAP = {
@@ -841,9 +841,9 @@ def synthesize_neural_speech(
 ) -> list[int] | None:
     """
     Universal Single-Voice Cross-Lingual HD Synthesizer.
-    Instant sub-20ms native Windows Narrator speech for Hindi, English, and Hinglish.
-    High-fidelity Microsoft Studio Neural Voice for international languages.
-    Zero CPU/GPU stress, identical locked female voice across languages.
+    Primary: Edge-TTS neural voice + OpenVoice voice conversion for studio HD quality.
+    Fallback: Windows SAPI Kalpana for instant offline speech when internet is unavailable.
+    Same locked female voice identity for Hindi, English, Hinglish, and all 21 languages.
     """
     try:
         cache_key = f"{text}_{lang_code}_{mood_name}_{speed_ratio}"
@@ -857,17 +857,17 @@ def synthesize_neural_speech(
             pcm_bytes = prefix_cache[pref_key]
             return list(struct.unpack(f"<{len(pcm_bytes)//2}h", pcm_bytes))
 
-        # 1. Instant Windows Narrator Path (Sub-20ms, 0% CPU, Same Female Voice across Hindi & English)
-        if sys.platform == "win32" and lang_code in ("hi", "en", "ur"):
-            native_samples = synthesize_native_onecore_speech(text, speed_ratio)
-            if native_samples:
-                return native_samples
-
-        # 2. Studio Neural Voices for all 21 languages (Pure in-memory, zero OpenVoice CPU drag)
+        # Primary: Edge-TTS HD Neural Voice + OpenVoice voice conversion
         import asyncio
         import io
         import edge_tts
+        import torch
         import torchaudio
+        from openvoice_cli.mel_processing import spectrogram_torch
+
+        conv, target_se = get_tone_converter()
+        conv.watermark_model = None
+        hps = conv.hps
 
         vname = NATIVE_VOICE_MAP.get(lang_code, "hi-IN-SwaraNeural")
         rate_str, pitch_str = MOOD_PROSODY_MAP.get(mood_name, ("+0%", "+0Hz"))
@@ -887,18 +887,39 @@ def synthesize_neural_speech(
         asyncio.run(_fetch_stream())
         raw_mp3 = b"".join(chunks)
         if not raw_mp3:
-            return None
+            raise RuntimeError("Edge-TTS returned empty audio")
 
         wav, sr = torchaudio.load(io.BytesIO(raw_mp3), format="mp3")
         if sr != 24000:
             wav = torchaudio.functional.resample(wav, sr, 24000)
-        wav_tensor = wav.mean(dim=0).float()
-        samples_np = wav_tensor.numpy()
-        samples_np = samples_np / (np.max(np.abs(samples_np)) + 1e-7) * 0.95
-        return [max(-32767, min(32767, int(x * 32767.0))) for x in samples_np]
+        wav_tensor = wav.mean(dim=0, keepdim=True).float()
+
+        # OpenVoice voice conversion to locked female speaker embedding
+        spec = spectrogram_torch(
+            wav_tensor,
+            hps.data.filter_length,
+            hps.data.sampling_rate,
+            hps.data.hop_length,
+            hps.data.win_length,
+            center=False,
+        )
+        spec_lengths = torch.LongTensor([spec.size(-1)])
+        with torch.no_grad():
+            converted = conv.model.voice_conversion(
+                spec, spec_lengths, sid_src=target_se, sid_tgt=target_se, tau=0.3
+            )[0][0, 0].cpu().numpy()
+
+        converted = converted / (np.max(np.abs(converted)) + 1e-7) * 0.95
+        return [max(-32767, min(32767, int(x * 32767.0))) for x in converted]
 
     except Exception as e:
-        print(f"[Warning] Neural speech fallback for '{lang_code}': {e}")
+        # Fallback: Windows SAPI Kalpana (offline, instant, lower quality)
+        # ponytail: only used when Edge-TTS network is down
+        if sys.platform == "win32":
+            native = synthesize_native_onecore_speech(text, speed_ratio)
+            if native:
+                return native
+        print(f"[Warning] Speech synthesis failed for '{lang_code}': {e}")
     return None
 
 
@@ -1192,11 +1213,12 @@ def interactive_mode(
     print("  Commands: '!lang <code>' (e.g. !lang hi), '!mood <name>', '!speed <float>', 'exit'")
     print("=" * 78 + "\n")
 
-    print("[*] Initializing Studio Female Voice Engine (Instant Windows Narrator Mode)...")
+    print("[*] Initializing Studio Female Voice Engine...")
     try:
+        get_tone_converter()
         get_native_onecore_voice()
         load_prefix_cache()
-        print("[+] Voice Engine ready! Sub-20ms instant speech active across Hindi & English (0% CPU stress).\n")
+        print("[+] Voice Engine ready! HD Neural Voice + instant offline fallback active.\n")
     except Exception as e:
         print(f"[!] Warning: {e}\n")
 
