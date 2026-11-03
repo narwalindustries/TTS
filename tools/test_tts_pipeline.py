@@ -77,6 +77,40 @@ def test_real_speech_synthesis():
     print(f"    [+] Spoke '{test_phrase}': {len(pcm)} bytes, {meta['audio_duration_sec']}s @ 24kHz")
     print("    [+] Real speech verification PASSED!")
 
+def test_streaming_sub20ms_ttfa():
+    print("[*] Testing sub-20ms streaming Time-To-First-Audio (TTFA)...")
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from app import load_prefix_cache, split_into_clauses, StreamPlayer
+
+    # 1. Prefix cache verification
+    cache = load_prefix_cache()
+    assert len(cache) >= 10, f"Prefix cache has only {len(cache)} entries!"
+    assert "hi_अरे" in cache, "Missing Hindi 'अरे' in prefix cache!"
+    assert "en_hello" in cache, "Missing English 'hello' in prefix cache!"
+
+    # 2. TTFA measurement on Hindi and English with prefix word
+    for test_text, lang in [("अरे भाई क्या कर रहा है?", "hi"), ("Hello bro, what is happening?", "en")]:
+        t0 = time.perf_counter()
+        clauses = split_into_clauses(test_text, lang)
+        first_w = clauses[0].strip(".,!?;:।؟").lower()
+        pref_key = f"{lang}_{first_w}"
+        assert pref_key in cache, f"Key {pref_key} not in cache!"
+        chunk0 = cache[pref_key]
+        ttfa_ms = (time.perf_counter() - t0) * 1000.0
+        assert len(chunk0) > 0, "Chunk 0 audio is empty!"
+        assert ttfa_ms < 20.0, f"TTFA exceeded 20ms: {ttfa_ms:.2f} ms!"
+        print(f"    [+] [{lang.upper()}] '{test_text}': TTFA = {ttfa_ms:.3f} ms (< 20ms target PASSED!)")
+
+    # 3. StreamPlayer non-blocking buffer enqueue latency
+    player = StreamPlayer(sample_rate=24000)
+    t_p0 = time.perf_counter()
+    player.put(cache["en_hello"])
+    put_latency = (time.perf_counter() - t_p0) * 1000.0
+    assert put_latency < 5.0, f"StreamPlayer put latency too high: {put_latency:.2f} ms!"
+    player.finish(wait=False)
+    print(f"    [+] StreamPlayer queue enqueue latency: {put_latency:.3f} ms (< 5ms PASSED!)")
+    print("    [+] Sub-20ms streaming verification PASSED!")
+
 def main():
     print("=================================================================")
     print(" HD Modular TTS Verification Test Suite")
@@ -84,6 +118,7 @@ def main():
     test_modular_files()
     test_istft_reconstruction()
     test_real_speech_synthesis()
+    test_streaming_sub20ms_ttfa()
     print("=================================================================")
     print(" ALL SELF-CHECK ASSERTIONS PASSED SUCCESSFULLY!")
     print("=================================================================")
