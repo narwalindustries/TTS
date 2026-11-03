@@ -110,6 +110,7 @@ include_directories(
 
 set(CORE_SOURCES
     src/MultilingualG2PN.cpp
+    src/ProsodyController.cpp
     src/HDModularTTSEngine.cpp
 )
 
