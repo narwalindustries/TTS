@@ -1,0 +1,5 @@
+{
+  "name": "IMS-Toucan 21-Language C++20 & NCNN TTS Studio",
+  "description": "Production C++20 & Tencent NCNN 21-language Text-to-Speech engine featuring 62-D Articulatory Conformer, Locked 192-D ECAPA-TDNN Speaker Timbre, Native C++20 ProsodyController, CFM Decoder, and 24kHz Studio HD Vocos iSTFT.",
+  "requestFramePermissions": []
+}

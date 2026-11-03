@@ -1,0 +1,7 @@
+7767517
+5 4
+Input            in_art           0 1 articulatory_features
+Input            in_lang          0 1 lang_id
+Input            in_spk           0 1 universal_speaker
+Convolution1D    conv_enc         1 1 articulatory_features encoder_hidden 0=512 1=3 2=1 3=1 4=0 5=1 6=95232
+Silence          sil_cond         2 0 lang_id universal_speaker

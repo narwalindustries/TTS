@@ -194,7 +194,8 @@ public class NativeTTS {
         SERIOUS(2),
         STORYTELLING(3),
         CALM(4),
-        EXCITED(5);
+        EXCITED(5),
+        CASUAL_SLANG(6);
 
         public final int id;
         Mood(int id) { this.id = id; }
@@ -204,6 +205,15 @@ public class NativeTTS {
         if (mEngineHandle != 0 && mood != null) {
             nativeSetMood(mEngineHandle, mood.id);
         }
+    }
+
+    /**
+     * Instantly speak text in any of the 21 languages with the specified Mood/Emotion
+     * using the single locked voice (universal_speaker.bin).
+     */
+    public boolean speak(String text, String langCode, Mood mood) {
+        setMood(mood);
+        return speak(text, langCode);
     }
 
     public void release() {

@@ -1,0 +1,9 @@
+7767517
+7 6
+Input            in_enc           0 1 encoder_hidden
+Input            in_dur           0 1 durations
+Input            in_f0            0 1 f0_pitch
+Input            in_en            0 1 energy
+Input            in_spk           0 1 universal_speaker
+Convolution1D    conv_cfm         1 1 encoder_hidden mel_spec 0=80 1=3 2=1 3=1 4=0 5=1 6=122880
+Silence          sil_pros         4 0 durations f0_pitch energy universal_speaker

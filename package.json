@@ -1,0 +1,11 @@
+{
+  "name": "ims-toucan-modular-tts",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "python3 app.py",
+    "build": "python3 -m py_compile app.py tools/export_toucan_ncnn.py",
+    "lint": "python3 -m py_compile app.py tools/export_toucan_ncnn.py",
+    "start": "python3 app.py"
+  }
+}
