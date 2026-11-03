@@ -606,27 +606,6 @@ MOOD_PROSODY_MAP = {
     "Neutral": ("+0%", "+0Hz"),
 }
 
-MMS_MODEL_MAP = {
-    "en": "facebook/mms-tts-eng",
-    "hi": "facebook/mms-tts-hin",
-    "es": "facebook/mms-tts-spa",
-    "fr": "facebook/mms-tts-fra",
-    "de": "facebook/mms-tts-deu",
-    "ko": "facebook/mms-tts-kor",
-    "ru": "facebook/mms-tts-rus",
-    "ar": "facebook/mms-tts-ara",
-    "pt": "facebook/mms-tts-por",
-    "tr": "facebook/mms-tts-tur",
-    "nl": "facebook/mms-tts-nld",
-    "pl": "facebook/mms-tts-pol",
-    "id": "facebook/mms-tts-ind",
-    "vi": "facebook/mms-tts-vie",
-    "th": "facebook/mms-tts-tha",
-    "ta": "facebook/mms-tts-tam",
-    "bn": "facebook/mms-tts-ben",
-    "ur": "facebook/mms-tts-urd-script_arabic",
-}
-
 
 def load_prefix_cache() -> dict[str, bytes]:
     """Load pre-rendered 24kHz single-voice starter tokens from models/prefix_cache.pt."""
@@ -718,42 +697,42 @@ class StreamPlayer:
 
 def split_into_clauses(text: str, lang_code: str = "en") -> list[str]:
     """
-    Split text into streaming clauses/phrases.
-    If input starts with a known cached prefix word, separates it as Chunk 0 for <1ms playback.
-    If the first clause is long (> 5 words), splits off the first 2-3 words as an immediate lead chunk.
+    Split text into natural grammatical clauses at major punctuation boundaries:
+    . ? ! ; : \n । ؟
+    Keeps full phrases intact for natural female prosody without word-level stutter.
     """
     cleaned = text.strip()
     if not cleaned:
         return []
 
-    prefix_cache = load_prefix_cache()
-    words = cleaned.split()
-    first_w = words[0].strip(".,!?;:।؟").lower()
-    prefix_key = f"{lang_code}_{first_w}"
-
-    if prefix_key in prefix_cache and len(words) > 1:
-        lead = words[0]
-        remainder = " ".join(words[1:])
-        return [lead] + split_into_clauses(remainder, lang_code)
-
-    raw_clauses = [c.strip() for c in re.split(r'([.?!,:;\n।؟]+)', cleaned) if c.strip()]
+    raw_clauses = [c.strip() for c in re.split(r'([.?!;:\n।؟]+)', cleaned) if c.strip()]
     merged: list[str] = []
     i = 0
     while i < len(raw_clauses):
         seg = raw_clauses[i]
-        if i + 1 < len(raw_clauses) and re.match(r'^[.?!,:;\n।؟]+$', raw_clauses[i + 1]):
+        if i + 1 < len(raw_clauses) and re.match(r'^[.?!;:\n।؟]+$', raw_clauses[i + 1]):
             seg += raw_clauses[i + 1]
             i += 1
         merged.append(seg)
         i += 1
 
-    if merged:
-        first = merged[0]
-        f_words = first.split()
-        if len(f_words) > 5:
-            merged = [" ".join(f_words[:3]), " ".join(f_words[3:])] + merged[1:]
+    final_clauses: list[str] = []
+    for clause in (merged or [cleaned]):
+        words = clause.split()
+        if len(words) > 8 and ("," in clause or "،" in clause):
+            sub = [s.strip() for s in re.split(r'([,،]+)', clause) if s.strip()]
+            j = 0
+            while j < len(sub):
+                s = sub[j]
+                if j + 1 < len(sub) and re.match(r'^[,،]+$', sub[j + 1]):
+                    s += sub[j + 1]
+                    j += 1
+                final_clauses.append(s)
+                j += 1
+        else:
+            final_clauses.append(clause)
 
-    return merged or [cleaned]
+    return final_clauses or [cleaned]
 
 
 def get_tone_converter():
@@ -794,11 +773,14 @@ def synthesize_neural_speech(
 ) -> list[int] | None:
     """
     Universal Single-Voice Cross-Lingual HD Synthesizer.
-    Pure in-memory speech generation combining local MMS VITS / Edge-TTS with OpenVoice v2 voice conversion.
+    Pure in-memory speech generation using high-fidelity native female neural voices
+    unified via OpenVoice v2 to the locked studio female speaker embedding.
     Zero disk files, zero librosa disk I/O, zero watermark delay.
     """
     try:
+        import asyncio
         import io
+        import edge_tts
         import torch
         import torchaudio
         from openvoice_cli.mel_processing import spectrogram_torch
@@ -818,57 +800,32 @@ def synthesize_neural_speech(
         conv.watermark_model = None
         hps = conv.hps
 
-        wav_tensor: torch.Tensor | None = None
+        vname = NATIVE_VOICE_MAP.get(lang_code, "en-US-JennyNeural")
+        rate_str, pitch_str = MOOD_PROSODY_MAP.get(mood_name, ("+0%", "+0Hz"))
+        if speed_ratio != 1.0:
+            pct = int(round((speed_ratio - 1.0) * 100))
+            sign = "+" if pct >= 0 else ""
+            rate_str = f"{sign}{pct}%"
 
-        # 1. Prefer local MMS model if cached for ultra-fast zero-network CPU synthesis
-        if lang_code in MMS_MODEL_MAP:
-            try:
-                from transformers import AutoTokenizer, VitsModel
+        comm = edge_tts.Communicate(text, vname, rate=rate_str, pitch=pitch_str)
+        chunks: list[bytes] = []
 
-                m_id = MMS_MODEL_MAP[lang_code]
-                if m_id not in _MMS_MODELS:
-                    _MMS_MODELS[m_id] = (
-                        AutoTokenizer.from_pretrained(m_id),
-                        VitsModel.from_pretrained(m_id).eval(),
-                    )
-                tok, mod = _MMS_MODELS[m_id]
-                inp = tok(text, return_tensors="pt")
-                with torch.no_grad():
-                    wf16 = mod(**inp).waveform
-                wav_tensor = torchaudio.functional.resample(wf16, 16000, 24000)
-            except Exception:
-                wav_tensor = None
+        async def _fetch_stream():
+            async for item in comm.stream():
+                if item["type"] == "audio":
+                    chunks.append(item["data"])
 
-        # 2. In-memory Edge-TTS fallback
-        if wav_tensor is None:
-            import asyncio
-            import edge_tts
+        asyncio.run(_fetch_stream())
+        raw_mp3 = b"".join(chunks)
+        if not raw_mp3:
+            return None
 
-            vname = NATIVE_VOICE_MAP.get(lang_code, "en-US-JennyNeural")
-            rate_str, pitch_str = MOOD_PROSODY_MAP.get(mood_name, ("+0%", "+0Hz"))
-            if speed_ratio != 1.0:
-                pct = int(round((speed_ratio - 1.0) * 100))
-                sign = "+" if pct >= 0 else ""
-                rate_str = f"{sign}{pct}%"
+        wav, sr = torchaudio.load(io.BytesIO(raw_mp3), format="mp3")
+        if sr != 24000:
+            wav = torchaudio.functional.resample(wav, sr, 24000)
+        wav_tensor = wav.mean(dim=0, keepdim=True).float()
 
-            comm = edge_tts.Communicate(text, vname, rate=rate_str, pitch=pitch_str)
-            chunks: list[bytes] = []
-
-            async def _fetch_stream():
-                async for item in comm.stream():
-                    if item["type"] == "audio":
-                        chunks.append(item["data"])
-
-            asyncio.run(_fetch_stream())
-            raw_mp3 = b"".join(chunks)
-            if not raw_mp3:
-                return None
-            wav, sr = torchaudio.load(io.BytesIO(raw_mp3), format="mp3")
-            if sr != 24000:
-                wav = torchaudio.functional.resample(wav, sr, 24000)
-            wav_tensor = wav.mean(dim=0, keepdim=True).float()
-
-        # 3. Direct in-memory OpenVoice tone color conversion
+        # In-memory OpenVoice voice conversion to locked female speaker embedding
         spec = spectrogram_torch(
             wav_tensor,
             hps.data.filter_length,
@@ -1012,6 +969,30 @@ def speak(
             play_audio_in_memory(pcm_bytes, sample_rate=24000, wait=wait)
         return pcm_bytes, meta
 
+    # Check if exact sentence or phrase is in prefix cache
+    exact_key = f"{lang_code}_{cleaned.strip('.,!?;:।؟').lower()}"
+    prefix_cache = load_prefix_cache()
+    if exact_key in prefix_cache:
+        pcm_bytes = prefix_cache[exact_key]
+        lang_info = next((l for l in LANGUAGES if l["code"] == lang_code), LANGUAGES[0])
+        meta = {
+            "lang_code": lang_info["code"],
+            "lang_name": lang_info["name"],
+            "lang_id": lang_info["id"],
+            "mood": mood_name,
+            "clause_type": detect_clause_type(cleaned),
+            "raw_text": cleaned,
+            "colloquial_text": apply_colloquial_slang(cleaned, lang_code),
+            "num_samples": len(pcm_bytes) // 2,
+            "sample_rate": 24000,
+            "audio_duration_sec": round(len(pcm_bytes) / 48000.0, 2),
+            "streaming": True,
+            "num_clauses": 1,
+        }
+        if play:
+            play_audio_in_memory(pcm_bytes, sample_rate=24000, wait=wait)
+        return pcm_bytes, meta
+
     clauses = split_into_clauses(cleaned, lang_code)
     if not clauses:
         return b"", {}
@@ -1025,21 +1006,20 @@ def speak(
 
     # Streaming mode for instant Time-To-First-Audio (< 20 ms)
     player = StreamPlayer(sample_rate=24000) if play else None
-    prefix_cache = load_prefix_cache()
-
     first_clause = clauses[0]
-    first_w = first_clause.strip(".,!?;:।؟").lower()
-    pref_key = f"{lang_code}_{first_w}"
+    first_w = first_clause.split()[0].strip(".,!?;:।؟").lower() if first_clause.split() else ""
+    word_key = f"{lang_code}_{first_w}"
 
     collected_pcm: list[bytes] = []
 
-    # Check if first clause or its starter word is in prefix cache
-    if pref_key in prefix_cache:
-        chunk0_pcm = prefix_cache[pref_key]
-        collected_pcm.append(chunk0_pcm)
+    # If first word or clause is in prefix cache, play instantly (< 1ms)
+    if word_key in prefix_cache and len(first_clause.split()) > 1:
+        lead_pcm = prefix_cache[word_key]
+        collected_pcm.append(lead_pcm)
         if player:
-            player.put(chunk0_pcm)
-        remaining_clauses = clauses[1:]
+            player.put(lead_pcm)
+        remainder_first = first_clause[len(first_clause.split()[0]):].strip()
+        remaining_clauses = [remainder_first] + clauses[1:]
     else:
         # Novel uncached starter: engage audio DAC immediately with vocal presence buffer (<15ms)
         if player:
@@ -1054,6 +1034,8 @@ def speak(
     # Synthesize remaining clauses in background thread pipelined
     def _producer():
         for clause in remaining_clauses:
+            if not clause or not clause.strip():
+                continue
             pcm, _ = synthesize_ims_toucan(clause, lang_code, mood_name, speed_ratio)
             if pcm:
                 collected_pcm.append(pcm)

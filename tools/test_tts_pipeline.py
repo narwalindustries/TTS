@@ -12,6 +12,7 @@ import sys
 import struct
 import math
 import time
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -92,14 +93,21 @@ def test_streaming_sub20ms_ttfa():
     for test_text, lang in [("अरे भाई क्या कर रहा है?", "hi"), ("Hello bro, what is happening?", "en")]:
         t0 = time.perf_counter()
         clauses = split_into_clauses(test_text, lang)
-        first_w = clauses[0].strip(".,!?;:।؟").lower()
+        first_w = clauses[0].split()[0].strip(".,!?;:।؟").lower()
         pref_key = f"{lang}_{first_w}"
         assert pref_key in cache, f"Key {pref_key} not in cache!"
         chunk0 = cache[pref_key]
         ttfa_ms = (time.perf_counter() - t0) * 1000.0
         assert len(chunk0) > 0, "Chunk 0 audio is empty!"
         assert ttfa_ms < 20.0, f"TTFA exceeded 20ms: {ttfa_ms:.2f} ms!"
-        print(f"    [+] [{lang.upper()}] '{test_text}': TTFA = {ttfa_ms:.3f} ms (< 20ms target PASSED!)")
+
+        # 2b. Pitch / Gender verification: Must be female (>180 Hz)
+        samples = np.frombuffer(chunk0, dtype=np.int16).astype(np.float32)
+        corr = np.correlate(samples, samples, mode='full')[len(samples)-1:]
+        min_lag, max_lag = int(24000/400), int(24000/80)
+        pitch = 24000 / (np.argmax(corr[min_lag:max_lag]) + min_lag)
+        assert pitch >= 180.0, f"Detected male/abnormal pitch {pitch:.1f}Hz, expected female (>180Hz)!"
+        print(f"    [+] [{lang.upper()}] '{test_text}': TTFA = {ttfa_ms:.3f} ms, Pitch = {pitch:.1f} Hz (FEMALE VERIFIED!)")
 
     # 3. StreamPlayer non-blocking buffer enqueue latency
     player = StreamPlayer(sample_rate=24000)
